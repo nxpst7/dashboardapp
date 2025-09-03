@@ -1,28 +1,27 @@
 // /app/dashboard/page.tsx
 "use client";
 
-import { useState, useEffect, useRef, type ReactNode } from "react";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/app/context/AuthContext";
 import { useRouter } from "next/navigation";
 import FingerprintJS from "@fingerprintjs/fingerprintjs";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import { Wifi } from "lucide-react";
-import JharviMockupBackground from "@/components/JharviMockupBackground";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import dynamic from "next/dynamic";
+import nextDynamic from "next/dynamic";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getSupabaseBrowser } from "@/lib/supabaseBrowser"; // ✅ nuevo import
+import { getSupabaseBrowser } from "@/lib/supabaseBrowser";
 
 /* Evita SSR para el fondo animado */
-const JharviMockupBackgroundNoSSR = dynamic(
+const JharviMockupBackgroundNoSSR = nextDynamic(
   () => import("@/components/JharviMockupBackground"),
   { ssr: false }
 );
-
-/* ✅ Supabase del navegador (factory, sin usar envs aquí) */
-const supabase = getSupabaseBrowser();
 
 /* 🇩🇴 Corte a las 8:00 PM hora de República Dominicana (UTC-4) */
 const RD_UTC_OFFSET = -4;
@@ -55,7 +54,7 @@ function nextRDCutoffAfter(fromMs: number) {
   return fromMs < base ? base : base + 24 * 3600 * 1000;
 }
 
-/* ✅ formateo tiempo (movido arriba para uso en saveNow) */
+/* formateo tiempo */
 const formatDuration = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   const days = Math.floor(s / 86400);
@@ -68,6 +67,13 @@ export default function Dashboard() {
   const { account }: { account: string | null } = useAuth();
   const router = useRouter();
 
+  // ✅ Supabase sólo en el navegador (sin disparar prerender)
+  const supabaseRef = useRef<SupabaseClient | null>(null);
+  if (typeof window !== "undefined" && !supabaseRef.current) {
+    supabaseRef.current = getSupabaseBrowser();
+  }
+  const supabase = supabaseRef.current;
+
   const [isRunning, setIsRunning] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -77,11 +83,12 @@ export default function Dashboard() {
   const [lastSeenAt, setLastSeenAt] = useState<Date | null>(null);
   const [sessionStartedAt, setSessionStartedAt] = useState<Date | null>(null);
 
-  const saveTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const saveIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const tickIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const [openJoin, setOpenJoin] = useState(false);
+  // ⬇ timers con tipos de browser
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [openJoin, setOpenJoin] = useState(false);
   const loadedRef = useRef(false);
 
   // clave de localStorage por wallet
@@ -90,30 +97,30 @@ export default function Dashboard() {
     lastTickKeyRef.current = `jharvi:lastTick:${account ?? "anon"}`;
   }, [account]);
 
-  const lastTickRef = useRef<number | null>(null); // última marca de tiempo efectiva usada para acumular
+  const lastTickRef = useRef<number | null>(null);
 
-  // ⭐ Estados para "Your Networks"
+  // "Your Networks"
   const [publicIP, setPublicIP] = useState<string | null>(null);
   const [sessionStartMs, setSessionStartMs] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState<number>(0);
   const [netScore, setNetScore] = useState<number>(0);
 
-  // ⭐ Nombre editable de la red (persistente)
+  // Nombre editable
   const [deviceName, setDeviceName] = useState<string>("Untitled Device");
   const [editingName, setEditingName] = useState<boolean>(false);
   const [savingName, setSavingName] = useState<boolean>(false);
   const deviceNameInputRef = useRef<HTMLInputElement | null>(null);
 
-  // ⭐ Estados de geolocalización
+  // Geolocalización
   const [countryCode, setCountryCode] = useState<string | null>(null);
   const [countryName, setCountryName] = useState<string | null>(null);
 
-  // Refs para evitar updates repetidos en DB
+  // Refs para evitar updates repetidos
   const prevIpRef = useRef<string | null>(null);
   const prevCCodeRef = useRef<string | null>(null);
   const prevCNameRef = useRef<string | null>(null);
 
-  // === Obtener IP pública ===
+  // === IP pública
   useEffect(() => {
     let abort = false;
     (async () => {
@@ -128,7 +135,7 @@ export default function Dashboard() {
     };
   }, []);
 
-  // === Geolocalizar por IP (ipapi.co) ===
+  // === Geolocalizar por IP
   useEffect(() => {
     if (!publicIP) return;
     let abort = false;
@@ -159,10 +166,10 @@ export default function Dashboard() {
     if (!account) router.replace("/");
   }, [account, router]);
 
-  // Verificación de fingerprint
+  // Fingerprint
   useEffect(() => {
     const checkFingerprint = async () => {
-      if (!account) return;
+      if (!account || !supabase) return;
       const fp = await FingerprintJS.load();
       const result = await fp.get();
       const currentFingerprint = result.visitorId;
@@ -177,17 +184,17 @@ export default function Dashboard() {
         console.error("Error fetching fingerprint:", error);
         return;
       }
-      if (data && data.fingerprint !== currentFingerprint) {
+      if (data?.fingerprint && data.fingerprint !== currentFingerprint) {
         alert("Acceso denegado: este dispositivo no está autorizado.");
         router.replace("/");
       }
     };
     checkFingerprint();
-  }, [account, router]);
+  }, [account, router, supabase]);
 
-  // ⬇️ Carga inicial (incluye device_name + last_seen_at + session_started_at)
+  // Carga inicial
   useEffect(() => {
-    if (!account || loadedRef.current) return;
+    if (!account || loadedRef.current || !supabase) return;
 
     (async () => {
       const { data, error, status } = await supabase
@@ -231,9 +238,9 @@ export default function Dashboard() {
         if (countryCode) insertPayload.country_code = countryCode;
         if (countryName) insertPayload.country_name = countryName;
 
-        const { error: insErr }: any = await supabase.from("users").insert([insertPayload]);
+        const { error: insErr } = await supabase.from("users").insert([insertPayload]);
         if (insErr) {
-          if (insErr.code === "23505") {
+          if ((insErr as any).code === "23505") {
             const { data: again } = await supabase
               .from("users")
               .select(
@@ -272,14 +279,11 @@ export default function Dashboard() {
         setSessionStartedAt(data.session_started_at ? new Date(data.session_started_at) : null);
 
         const storedMs = Number(data.session_elapsed_ms ?? 0);
-        if (data.session_is_running) {
-          setSessionStartMs(Date.now() - storedMs);
-        } else {
-          setSessionStartMs(null);
-        }
+        if (data.session_is_running) setSessionStartMs(Date.now() - storedMs);
+        else setSessionStartMs(null);
+
         setElapsedMs(storedMs);
         setIsRunning(!!data.session_is_running);
-
         setDeviceName(data.device_name || "Untitled Device");
 
         prevIpRef.current = data.last_ip ?? null;
@@ -294,11 +298,11 @@ export default function Dashboard() {
       loadedRef.current = true;
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [account]);
+  }, [account, supabase]);
 
-  // ⬇️ Persistir IP/País cuando cambien (y ya cargamos user)
+  // Persistir IP/País cuando cambien
   useEffect(() => {
-    if (!account || !loadedRef.current) return;
+    if (!account || !loadedRef.current || !supabase) return;
 
     const ipChanged = publicIP && publicIP !== prevIpRef.current;
     const ccChanged = countryCode !== prevCCodeRef.current;
@@ -323,11 +327,11 @@ export default function Dashboard() {
         console.error("save ip/country error:", e);
       }
     })();
-  }, [account, publicIP, countryCode, countryName]);
+  }, [account, publicIP, countryCode, countryName, supabase]);
 
-  // ⏰ Corte diario a las 8:00 PM RD (usado por el guardado periódico)
+  // Corte diario a las 8:00 PM RD
   const maybeRollover = async (now: Date) => {
-    if (!account) return;
+    if (!account || !supabase) return;
     const cutoffUTC = getTodayCutoffUTC(now);
     const last = lastResetAt ? new Date(lastResetAt) : new Date(0);
     if (now >= cutoffUTC && last < cutoffUTC) {
@@ -336,10 +340,7 @@ export default function Dashboard() {
       try {
         await supabase
           .from("users")
-          .update({
-            daily_points: 0,
-            last_reset_at: now.toISOString(),
-          })
+          .update({ daily_points: 0, last_reset_at: now.toISOString() })
           .eq("wallet", account);
       } catch (e) {
         console.error("rollover save error:", e);
@@ -347,10 +348,9 @@ export default function Dashboard() {
     }
   };
 
-  /* ================ SAVE ROBUSTO (actualizado) ================ */
+  // Guardado robusto
   const saveNow = async () => {
-    if (!account) return;
-    if (!loadedRef.current) return;
+    if (!account || !loadedRef.current || !supabase) return;
 
     try {
       const { data: server, error: readErr, status } = await supabase
@@ -359,9 +359,7 @@ export default function Dashboard() {
         .eq("wallet", account)
         .maybeSingle();
 
-      if (readErr && status !== 406) {
-        console.warn("saveNow read warning:", readErr);
-      }
+      if (readErr && status !== 406) console.warn("saveNow read warning:", readErr);
 
       const srvTotal = Number(server?.total_points ?? 0);
       const srvDaily = Number(server?.daily_points ?? 0);
@@ -402,14 +400,14 @@ export default function Dashboard() {
   };
 
   const scheduleSave = () => {
-    if (!account) return;
-    if (!loadedRef.current) return;
+    if (!account || !loadedRef.current) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(saveNow, 5000);
   };
 
   useEffect(() => {
     scheduleSave();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [totalPoints, dailyPoints, lastResetAt, elapsedMs, isRunning, sessionStartMs]);
 
   useEffect(() => {
@@ -419,9 +417,10 @@ export default function Dashboard() {
     return () => {
       if (saveIntervalRef.current) clearInterval(saveIntervalRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account]);
 
-  // persistir inmediatamente al ocultar/cerrar y guardar lastTick
+  // Guardar al ocultar/cerrar
   useEffect(() => {
     const onHide = () => {
       if (document.visibilityState === "hidden") {
@@ -439,6 +438,7 @@ export default function Dashboard() {
       document.removeEventListener("visibilitychange", onHide);
       window.removeEventListener("beforeunload", onHide);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account, totalPoints, dailyPoints, lastResetAt, elapsedMs]);
 
   useEffect(() => {
@@ -452,6 +452,7 @@ export default function Dashboard() {
         localStorage.setItem(key, v);
       } catch {}
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account, totalPoints, dailyPoints, lastResetAt, elapsedMs]);
 
   const advanceCounters = (fromMs: number, toMs: number) => {
@@ -507,8 +508,7 @@ export default function Dashboard() {
 
   const bootstrappedRef = useRef(false);
   useEffect(() => {
-    if (!loadedRef.current) return;
-    if (!isRunning) return;
+    if (!loadedRef.current || !isRunning) return;
     if (bootstrappedRef.current) return;
 
     const now = Date.now();
@@ -535,7 +535,7 @@ export default function Dashboard() {
       localStorage.setItem(key, String(cursor));
     } catch {}
     bootstrappedRef.current = true;
-  }, [isRunning, lastSeenAt, sessionStartedAt, lastResetAt, loadedRef.current]);
+  }, [isRunning, lastSeenAt, sessionStartedAt, lastResetAt]);
 
   useEffect(() => {
     if (!isRunning) {
@@ -611,55 +611,9 @@ export default function Dashboard() {
     };
   }, [isRunning, sessionStartMs, dailyPoints]);
 
-  const handlePrimaryAction = async () => {
-    if (!account) {
-      alert("Please connect your wallet first.");
-      return;
-    }
-
-    if (isRunning) {
-      setIsProcessing(true);
-      try {
-        await new Promise((res) => setTimeout(res, 400));
-        setIsRunning(false);
-        await saveNow();
-        await supabase.from("users").update({ session_is_running: false }).eq("wallet", account);
-        setSessionStartMs(null);
-      } finally {
-        setIsProcessing(false);
-      }
-      return;
-    }
-
-    const startedAtISO = new Date().toISOString();
-    setOpenJoin(true);
-
-    try {
-      await supabase
-        .from("users")
-        .update({
-          session_started_at: startedAtISO,
-          last_seen_at: startedAtISO,
-          session_is_running: true,
-        })
-        .eq("wallet", account);
-
-      setSessionStartedAt(new Date(startedAtISO));
-      lastTickRef.current = Date.now();
-      try {
-        localStorage.setItem(lastTickKeyRef.current, String(lastTickRef.current));
-      } catch {}
-
-      setTimeout(() => {
-        void saveNow();
-      }, 1000);
-    } catch (e) {
-      console.error("set session_started_at error:", e);
-    }
-  };
-
+  // ========= helpers que faltaban (nombre y toggle red) =========
   const persistDeviceName = async (name: string) => {
-    if (!account) return;
+    if (!account || !supabase) return;
     setSavingName(true);
     try {
       await supabase.from("users").update({ device_name: name }).eq("wallet", account);
@@ -685,13 +639,65 @@ export default function Dashboard() {
     void persistDeviceName(next);
   };
 
-  const onKeyDownName: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
-    if (e.key === "Enter") {
-      e.currentTarget.blur();
-    } else if (e.key === "Escape") {
-      setEditingName(false);
+  const handlePrimaryAction = async () => {
+    if (!account || !supabase) {
+      alert("Please connect your wallet first.");
+      return;
+    }
+
+    if (isRunning) {
+      // detener
+      setIsProcessing(true);
+      try {
+        await new Promise((res) => setTimeout(res, 400));
+        setIsRunning(false);
+        await saveNow();
+        await supabase.from("users").update({ session_is_running: false }).eq("wallet", account);
+        setSessionStartMs(null);
+      } finally {
+        setIsProcessing(false);
+      }
+      return;
+    }
+
+    // iniciar
+    const startedAtISO = new Date().toISOString();
+    setOpenJoin(true);
+
+    try {
+      await supabase
+        .from("users")
+        .update({
+          session_started_at: startedAtISO,
+          last_seen_at: startedAtISO,
+          session_is_running: true,
+        })
+        .eq("wallet", account);
+
+      setSessionStartedAt(new Date(startedAtISO));
+      lastTickRef.current = Date.now();
+      try {
+        localStorage.setItem(lastTickKeyRef.current, String(lastTickRef.current));
+      } catch {}
+      setTimeout(() => {
+        void saveNow();
+      }, 1000);
+    } catch (e) {
+      console.error("set session_started_at error:", e);
     }
   };
+  // ============================================================
+
+  // ========= LOADING GUARD (tras crear supabase) =========
+  const supabaseReady = typeof window !== "undefined" && !!supabase;
+  if (!supabaseReady) {
+    return (
+      <div className="min-h-screen grid place-items-center text-white bg-neutral-950">
+        <div className="opacity-80">Loading…</div>
+      </div>
+    );
+  }
+  // ======================================================
 
   const rows = [
     {
@@ -707,17 +713,13 @@ export default function Dashboard() {
 
   return (
     <div className="relative ml-64 min-h-screen overflow-y-auto text-white">
-      {/* ===== Fondo global con Mockup (versión sin SSR) ===== */}
       <JharviMockupBackgroundNoSSR points={dailyPoints} showSelfNode />
 
-      {/* Sidebar con transparencia forzada */}
       <div className="[&_*]:bg-transparent [&_*]:bg-opacity-0 [&_*]:backdrop-blur-sm">
         <Sidebar />
       </div>
 
-      {/* Contenido por encima del mockup */}
       <div className="relative z-10 flex-1 min-h-screen">
-        {/* Navbar con transparencia forzada */}
         <div className="[&_*]:bg-transparent [&_*]:bg-opacity-0 [&_*]:backdrop-blur-sm">
           <Navbar
             onJoinCollective={() => setOpenJoin(true)}
@@ -728,22 +730,16 @@ export default function Dashboard() {
         </div>
 
         <main className="p-6 -mt-6">
-          {/* Aviso translúcido */}
           <div className="bg-black/40 backdrop-blur-sm p-4 rounded-xl text-sm text-white mb-6 max-w-6xl mx-auto border border-white/10">
             Welcome to Phase 1! On the dashboard you will see your earnings. To view your total number of points, simply navigate to the{" "}
-            <Link
-              href="/rewards"
-              className="underline font-bold hover:text-lime-400 transition"
-            >
+            <Link href="/rewards" className="underline font-bold hover:text-lime-400 transition">
               Rewards tab
             </Link>{" "}
             on the left.
           </div>
 
           <section className="max-w-6xl mx-auto">
-            {/* ⭐ Earnings */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Phase 1 Earnings */}
               <div className="bg-black/40 backdrop-blur-sm border border-white/10 rounded-xl px-6 py-6 flex flex-col justify-between">
                 <div className="flex items-center gap-2 mb-6">
                   <p className="text-sm text-white font-bold">
@@ -751,7 +747,6 @@ export default function Dashboard() {
                   </p>
                 </div>
 
-                {/* total + logo juntos */}
                 <div className="mt-4 flex items-center justify-center gap-3">
                   <img
                     src="/img/logocircular.png"
@@ -769,7 +764,6 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* Jharvi PASS */}
               <div className="bg-black/40 backdrop-blur-sm border border-white/10 text-white rounded-xl px-6 py-6 flex flex-col justify-between relative group">
                 <div>
                   <h4 className="text-lg font-semibold mb-2">Jharvi PASS</h4>
@@ -782,21 +776,15 @@ export default function Dashboard() {
                   Coming Soon
                 </button>
 
-                {/* Imagen con efectos */}
                 <div className="absolute bottom-0 right-10 w-28 md:w-36">
                   <div className="relative">
                     <motion.img
                       src="/img/pass.png"
                       alt="Jharvi Pass"
-                      className="relative z-10 w-full object-contain opacity-90
-                                 drop-shadow-[0_0_16px_rgba(16,185,129,0.45)]
-                                 transition-transform duration-300 will-change-transform
-                                 group-hover:scale-110 group-hover:rotate-2"
+                      className="relative z-10 w-full object-contain opacity-90 drop-shadow-[0_0_16px_rgba(16,185,129,0.45)] transition-transform duration-300 will-change-transform group-hover:scale-110 group-hover:rotate-2"
                       animate={{ y: [0, -6, 0], rotate: [0, -2, 0] }}
                       transition={{ duration: 3, ease: "easeInOut", repeat: Infinity }}
                     />
-
-                    {/* OVERLAY por encima de la imagen */}
                     <div className="absolute inset-0 z-30 overflow-hidden rounded-lg pointer-events-none">
                       <span className="pass-shimmer" aria-hidden />
                     </div>
@@ -828,7 +816,7 @@ export default function Dashboard() {
                 opacity: 0.95;
               }
               @keyframes passShimmer {
-                0%   { left: -150%; }
+                0% { left: -150%; }
                 100% { left: 150%; }
               }
             `}</style>
@@ -866,7 +854,7 @@ export default function Dashboard() {
                           </div>
                         </td>
 
-                        {/* ======== Network Name editable ======== */}
+                        {/* Network Name editable */}
                         <td className="px-4 py-2 text-white font-bold">
                           {!editingName ? (
                             <button
@@ -883,7 +871,10 @@ export default function Dashboard() {
                               value={deviceName}
                               onChange={(e) => setDeviceName(e.target.value)}
                               onBlur={finishEditingName}
-                              onKeyDown={onKeyDownName}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                                else if (e.key === "Escape") setEditingName(false);
+                              }}
                               maxLength={64}
                             />
                           )}
@@ -897,7 +888,6 @@ export default function Dashboard() {
                           </button>
                           {savingName && <span className="ml-2 text-xs text-white/70">saving…</span>}
                         </td>
-                        {/* ===================================== */}
 
                         <td className="px-4 py-2 flex text-white items-center gap-2">
                           <span className="text-lg">{flagEmoji(countryCode)}</span>
@@ -923,14 +913,14 @@ export default function Dashboard() {
       </div>
 
       {/* Modal: al completar enciende la red */}
-      {openJoin && (
+      {openJoin && supabase && (
         <JoinFlowModal
           wallet={account}
-          supabase={supabase}
+          supabase={supabase as SupabaseClient}
           onClose={() => setOpenJoin(false)}
           onComplete={() => {
             setIsRunning(true);
-            setSessionStartMs(Date.now()); // inicia sesión nueva
+            setSessionStartMs(Date.now());
             lastTickRef.current = Date.now();
             try {
               localStorage.setItem(lastTickKeyRef.current, String(lastTickRef.current));
@@ -1001,9 +991,7 @@ function JoinFlowModal({
       <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-neutral-950 text-white overflow-hidden">
         <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
           <h3 className="text-lg font-semibold">Join the Collective Mind</h3>
-          <button onClick={onClose} className="text-white/70 hover:text-white">
-            ✕
-          </button>
+          <button onClick={onClose} className="text-white/70 hover:text-white">✕</button>
         </div>
 
         <div className="p-5 space-y-4">
@@ -1082,20 +1070,6 @@ function JoinFlowModal({
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ================================
-   UI helpers
-   ================================ */
-
-function Feature({ icon, title, desc }: { icon: ReactNode; title: string; desc: string }) {
-  return (
-    <div className="bg-[#096b2b]/40 backdrop-blur-sm border border-white/10 rounded-2xl p-5 text-center">
-      <div className="flex justify-center text-white">{icon}</div>
-      <h3 className="text-semibold text-lg text-white mb-1">{title}</h3>
-      <p className="text-white text-sm">{desc}</p>
     </div>
   );
 }

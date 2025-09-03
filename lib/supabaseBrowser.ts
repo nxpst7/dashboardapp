@@ -3,19 +3,20 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 let _client: SupabaseClient | null = null;
 
-/** Cliente para el navegador (usa ANON). No se crea en top-level. */
-export function getSupabaseBrowser(): SupabaseClient {
+export function getSupabaseBrowser() {
   if (_client) return _client;
-
+  // Solo en browser
+  if (typeof window === "undefined") {
+    // Evitamos instanciar durante prerender/SSR
+    return null as any;
+  }
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   if (!url || !anon) {
-    // Mensaje útil si llega a faltar en runtime (no rompe el build)
-    console.warn("⚠️ Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
-    throw new Error("Supabase browser envs are missing");
+    console.warn("⚠️ Falta NEXT_PUBLIC_SUPABASE_URL o NEXT_PUBLIC_SUPABASE_ANON_KEY");
+    return null as any; // evita crear cliente inválido
   }
-
   _client = createClient(url, anon);
   return _client;
 }
